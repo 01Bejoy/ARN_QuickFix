@@ -1,0 +1,716 @@
+<?php
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+require_once __DIR__ . '/arn_features.php';
+
+ini_set('display_errors', 1);
+ini_set('display_startup_errors', 1);
+error_reporting(E_ALL);
+
+// Force authorization checks for managers strictly
+if (!isset($_SESSION['email']) || (isset($_SESSION['role']) && strtolower($_SESSION['role']) !== 'manager')) {
+    header("Location: login.php");
+    exit();
+}
+
+$managerEmail = $_SESSION['email'];
+$managerName = $_SESSION['name'] ?? 'Operations Manager';
+
+// Establish Database Connection
+$conn = new mysqli("127.0.0.1", "root", "", "arn_quickfix");
+if ($conn->connect_error) {
+    die("Database Connection Error: " . $conn->connect_error);
+}
+
+// --------------------------------------------------------------------
+// FORM PROCESSING: HANDLE ADD NEW MAINTENANCE SCHEDULE
+// --------------------------------------------------------------------
+$actionMessage = "";
+$actionError = "";
+
+if ($_SERVER["REQUEST_METHOD"] === "POST" && isset($_POST['action_type'])) {
+    if ($_POST['action_type'] === 'add_schedule') {
+        $client_email = trim($_POST['client_email'] ?? '');
+        $asset_ref_id = (int)($_POST['asset_ref_id'] ?? 0);
+        $asset_type = '';
+        $asset_id = '';
+        $last_service = $_POST['last_service'] ?? '';
+        $next_due = $_POST['next_due'] ?? '';
+        $maintenance_type = $_POST['maintenance_type'] ?? '';
+        $status = $_POST['status'] ?? 'Active';
+
+        // Save form entries transiently to survive the reload cache loop
+        $_SESSION['selected_asset_ref_id'] = $asset_ref_id;
+        $_SESSION['form_cache'] = [
+            'client_email' => $client_email,
+            'asset_type' => $asset_type,
+            'asset_id' => strtoupper($asset_id),
+            'last_service' => $last_service,
+            'next_due' => $next_due,
+            'maintenance_type' => $maintenance_type,
+            'status' => $status
+        ];
+
+        // 1. Mandatory Fields Validation Check
+        if (!empty($client_email) && $asset_ref_id > 0 && !empty($next_due) && !empty($maintenance_type)) {
+            
+            // Asset identity is selected from the canonical asset registry; it is never manually typed.
+            $assetVerificationStmt = $conn->prepare("SELECT id, customer_email, asset_id, asset_type FROM assets WHERE id = ? AND LOWER(TRIM(customer_email)) = LOWER(TRIM(?)) LIMIT 1");
+            $assetVerificationStmt->bind_param("is", $asset_ref_id, $client_email);
+            $assetVerificationStmt->execute();
+            $assetRow = $assetVerificationStmt->get_result()->fetch_assoc();
+            $assetVerificationStmt->close();
+            $assetCheckResult = ['total' => $assetRow ? 1 : 0];
+            if ($assetRow) { $asset_id = $assetRow['asset_id']; $asset_type = $assetRow['asset_type']; }
+
+                        // ====================================================================
+            // FIXED UNIFIED ASSET TYPE & ID MATCH VALIDATION
+            // ====================================================================
+            if ((int)$assetCheckResult['total'] === 0) {
+                $_SESSION['form_cache']['asset_id'] = ""; // Clear bad input field only
+                
+                // FIXED ERGONOMIC PHRASING: Combined into your active session redirect block!
+                $_SESSION['action_error'] = "⚠️ Operational Limit: Data Validation Mismatch! Both the Asset Type and Asset ID must match our records.";
+                
+                header("Location: overdue_maintenance.php");
+                exit();
+            }
+
+                        // ====================================================================
+            // INTERLOCK GUARD RAIL: BLOCKS DUPLICATE SCHEDULES FOR ONGOING REPAIRS
+            // ====================================================================
+            // Scans your service ledger to see if this precise asset is actively being fixed right now
+            $repairCheckStmt = $conn->prepare("SELECT COUNT(*) AS active_repair FROM service_requests WHERE asset_id = ? AND LOWER(TRIM(status)) = 'processing'");
+            $repairCheckStmt->bind_param('s', $asset_id);
+            $repairCheckStmt->execute();
+            $repairCheckResult = $repairCheckStmt->get_result()->fetch_assoc() ?: ['active_repair' => 0];
+            $repairCheckStmt->close();
+            if ((int)$repairCheckResult['active_repair'] > 0) {
+                    $_SESSION['form_cache']['asset_id'] = $asset_id; // Retain input for the manager's convenience
+                    $_SESSION['action_error'] = "🛑 Operational Lockout: A technician is currently overseeing an active repair request for Asset ID '{$asset_id}'! You cannot schedule routine maintenance until the ticket is marked Completed.";
+                    header("Location: overdue_maintenance.php");
+                    exit();
+                }
+
+
+            // Fetch client identity metrics
+            $phoneStmt = $conn->prepare("SELECT phone, name FROM users WHERE email = ?");
+            $phoneStmt->bind_param("s", $client_email);
+            $phoneStmt->execute();
+            $clientProfile = $phoneStmt->get_result()->fetch_assoc();
+            $phoneStmt->close();
+            
+            $client_phone = $clientProfile['phone'] ?? '01234567899';
+            $client_name = $clientProfile['name'] ?? 'Client User';
+
+            // 2. Critical Logical Date Checker Gates
+            $todayDateString = date('Y-m-d'); // Current system date: 2026-08-01
+            
+            // GATE A: Block future dates from being marked as Overdue
+            if ($status === 'Overdue' && $next_due > $todayDateString) {
+                $_SESSION['form_cache']['next_due'] = "";
+                $_SESSION['form_cache']['status'] = "Active";
+                $_SESSION['action_error'] = "Logical Error Rejected! A maintenance schedule cannot be marked as 'Overdue' if the Next Due Date is still in the future.";
+                header("Location: overdue_maintenance.php");
+                exit();
+            } 
+            // GATE B: Block future dates from being marked as Completed upfront
+            elseif ($status === 'Completed' && $next_due > $todayDateString) {
+                $_SESSION['form_cache']['next_due'] = "";
+                $_SESSION['form_cache']['status'] = "Active";
+                $_SESSION['action_error'] = "Workflow Error Rejected! You cannot mark a future maintenance cycle as 'Completed' before that date has actually arrived.";
+                header("Location: overdue_maintenance.php");
+                exit();
+            }
+            else {
+                // If all business rules pass with absolute accuracy, insert row cleanly
+                $insertStmt = $conn->prepare("INSERT INTO maintenance_schedules (client_email, client_name, phone, asset_type, asset_id, asset_ref_id, last_service, next_due, maintenance_type, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                $insertStmt->bind_param("sssssissss", $client_email, $client_name, $client_phone, $asset_type, $asset_id, $asset_ref_id, $last_service, $next_due, $maintenance_type, $status);
+                
+                if ($insertStmt->execute()) {
+                    $_SESSION['action_message'] = "Success! Maintenance task logged and published onto client portal lanes.";
+                    unset($_SESSION['form_cache'], $_SESSION['selected_asset_ref_id']); // Clear form memory after success
+                } else {
+                    $_SESSION['action_error'] = "Database Error: Could not save schedule parameters.";
+                }
+                $insertStmt->close();
+                
+                header("Location: overdue_maintenance.php");
+                exit();
+            }
+        } else {
+            $_SESSION['action_error'] = "Validation Error: Please fill in all mandatory form input variables.";
+            header("Location: overdue_maintenance.php");
+            exit();
+        }
+    }
+}
+
+
+// --------------------------------------------------------------------
+// MEMORY STORAGE EXTRACTOR PIPELINES
+// --------------------------------------------------------------------
+$cache = $_SESSION['form_cache'] ?? [
+    'client_email'=>'', 'asset_type'=>'', 'asset_id'=>'', 'last_service'=>'', 'next_due'=>'', 'maintenance_type'=>'', 'status'=>'Active'
+];
+
+if (isset($_SESSION['action_message'])) { $actionMessage = $_SESSION['action_message']; unset($_SESSION['action_message']); }
+if (isset($_SESSION['action_error'])) { $actionError = $_SESSION['action_error']; unset($_SESSION['action_error']); }
+
+
+// --------------------------------------------------------------------
+// DYNAMIC MESSAGE EXTRACTOR (Pulls strings out of memory arrays)
+// --------------------------------------------------------------------
+if (isset($_SESSION['action_message'])) {
+    $actionMessage = $_SESSION['action_message'];
+    unset($_SESSION['action_message']); // Flush instantly to prevent repeating alerts
+}
+if (isset($_SESSION['action_error'])) {
+    $actionError = $_SESSION['action_error'];
+    unset($_SESSION['action_error']);
+}
+
+
+
+// --------------------------------------------------------------------
+// CALCULATE UPPER VIEW COMPONENT SUMS (DYNAMIC COUNTERS)
+// --------------------------------------------------------------------
+$totalScheduled = 0;
+$totalOverdue = 0;
+
+$qSched = $conn->query("SELECT COUNT(*) as total FROM maintenance_schedules");
+if ($qSched) { $totalScheduled = $qSched->fetch_assoc()['total'] ?? 0; }
+
+// ====================================================================
+// SYNCED DYNAMIC OPERATIONAL DATA OVERDUE METRIC ENGINE (FIXED)
+// ====================================================================
+$currentCalendarDay = date('Y-m-d'); // Today's date (2026-08-03)
+$totalOverdue = 0;
+
+// FIXED COMPILER: Counts the row if the status is explicitly 'Overdue' 
+// OR if its target deadline date is older than today!
+$qOver = $conn->prepare("SELECT COUNT(*) AS total FROM maintenance_schedules
+                      WHERE LOWER(TRIM(status)) <> 'completed'
+                      AND (LOWER(TRIM(status)) = 'overdue' OR next_due < ?)");
+$qOver->bind_param('s', $currentCalendarDay);
+$qOver->execute();
+$totalOverdue = (int)($qOver->get_result()->fetch_assoc()['total'] ?? 0);
+$qOver->close();
+
+// Fetch clients to populate select dropdown input field
+$clientsList = $conn->query("SELECT id, email, name FROM users WHERE role IN ('client','user') ORDER BY name ASC");
+
+// Fetch active schedules record ledger
+// ====================================================================
+// RELATIONAL DATA JOIN TUNING LAYER (MAIN MASTER LIST QUERY)
+// ====================================================================
+// Links tables using asset_id to pull the real telephone digits recorded by the client!
+// ====================================================================
+// ✅ FIXED: AIRTIGHT SINGLE-TABLE SCHEDULER LEDGER SELECTION QUERY
+// ====================================================================
+// Completely drops the LEFT JOIN loop to eliminate duplicate row generation instantly!
+// ====================================================================
+// ✅ FIXED: DUP-SAFE RELATIONAL SCHEDULER LEDGER SELECTION QUERY
+// ====================================================================
+// Uses GROUP BY to safely pull client phone numbers without generating duplicate rows!
+$schedulesLedger = $conn->query("SELECT ms.*, sr.phone as real_client_phone 
+                                 FROM maintenance_schedules ms
+                                 LEFT JOIN service_requests sr ON ms.asset_id = sr.asset_id
+                                 GROUP BY ms.id
+                                 ORDER BY ms.id DESC");
+?>
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Maintenance Schedule Control Hub | ARN QuickFix Ltd.</title>
+  
+  <link href="css/bootstrap.min.css" rel="stylesheet">
+  <link href="css/style.css" rel="stylesheet">
+
+  <style>
+    :root {
+      --primary-cyan: #00C2CB;
+      --deep-navy: #0F172A;
+      --slate-gray: #475569;
+      --bg-canvas: #F8FAFC;
+      --border-light: #E2E8F0;
+    }
+    body {
+      background-color: var(--bg-canvas);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color: var(--deep-navy);
+      -webkit-font-smoothing: antialiased;
+    }
+    .manager-navbar {
+      background-color: #FFFFFF;
+      border-bottom: 1px solid var(--border-light);
+      padding: 16px 45px;
+    }
+    .brand-accent {
+      font-weight: 800;
+      font-size: 24px;
+      color: var(--deep-navy);
+      text-decoration: none;
+    }
+    .brand-accent span { color: var(--primary-cyan); }
+    
+    .figma-card-layout {
+      background: #FFFFFF;
+      border: 1px solid var(--border-light);
+      border-radius: 16px;
+      padding: 30px;
+      box-shadow: 0 4px 15px rgba(15, 23, 42, 0.01);
+    }
+    .metric-box-sub {
+      border: 1px solid var(--border-light);
+      border-radius: 12px;
+      background: #FFFFFF;
+      padding: 20px;
+      text-align: left;
+    }
+    .metric-value-large {
+      font-size: 32px;
+      font-weight: 800;
+      color: var(--deep-navy);
+      line-height: 1;
+    }
+    .form-label-custom {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--slate-gray);
+      margin-bottom: 6px;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+    }
+    .form-control-custom, .form-select-custom {
+      height: 44px;
+      background-color: #F8FAFC;
+      border: 1px solid #CBD5E1;
+      border-radius: 8px;
+      font-size: 13.5px;
+      color: var(--deep-navy);
+      padding: 10px 14px;
+    }
+    .form-control-custom:focus, .form-select-custom:focus {
+      border-color: var(--primary-cyan);
+      box-shadow: 0 0 0 3px rgba(0, 194, 203, 0.12);
+      background-color: #FFFFFF;
+    }
+    .btn-save-schedule {
+      background-color: var(--primary-cyan);
+      color: #FFFFFF;
+      font-weight: 700;
+      font-size: 13px;
+      height: 44px;
+      border: none;
+      border-radius: 8px;
+      transition: all 0.2s;
+    }
+    .btn-save-schedule:hover { background-color: #00AEC6; transform: translateY(-1px); }
+    
+    .status-badge-pill {
+      font-size: 11px;
+      font-weight: 700;
+      padding: 4px 12px;
+      border-radius: 20px;
+      text-transform: uppercase;
+    }
+    .status-overdue { background-color: #FEF2F2; color: #EF4444; border: 1px solid #FEE2E2; }
+    .status-active { background-color: #EFF6FF; color: #2563EB; border: 1px solid #BFDBFE; }
+    .status-completed { background-color: #F0FDF4; color: #16A34A; border: 1px solid #DCFCE7; }
+  </style>
+  
+  <script>
+    // Client Target Email -> Registered Asset linkage.
+    // Rebuild the Registered Asset options instead of relying on <option hidden>.
+    // This is more reliable across browsers and guarantees assets are filtered by
+    // both customer email and customer/user id.
+    document.addEventListener('DOMContentLoaded', function () {
+      const clientSelect = document.querySelector('select[name="client_email"]');
+      const assetSelect = document.getElementById('asset_ref_id');
+      const assetHelp = document.getElementById('assetHelp');
+      const requestedEmail = 'brbejoy901@gmail.com';
+
+      if (!clientSelect || !assetSelect) return;
+
+      const allAssets = Array.from(assetSelect.options)
+        .filter(function (option) { return option.value !== ''; })
+        .map(function (option) {
+          return {
+            value: option.value,
+            text: option.textContent.trim(),
+            email: (option.dataset.email || '').trim().toLowerCase(),
+            customerId: (option.dataset.customerId || '').trim(),
+            matchedUserId: (option.dataset.matchedUserId || '').trim()
+          };
+        });
+
+      function findClientByEmail(email) {
+        return Array.from(clientSelect.options).find(function (o) {
+          return (o.value || '').trim().toLowerCase() === email;
+        });
+      }
+
+      // If there is no previously selected client, use the requested client.
+      if (!clientSelect.value) {
+        const requestedOption = findClientByEmail(requestedEmail);
+        if (requestedOption) clientSelect.value = requestedOption.value;
+      }
+
+      function syncRegisteredAssets() {
+        const email = (clientSelect.value || '').trim().toLowerCase();
+        const selectedOption = clientSelect.options[clientSelect.selectedIndex];
+        const userId = selectedOption ? (selectedOption.dataset.userId || '').trim() : '';
+        const currentValue = assetSelect.value;
+
+        // Keep the placeholder and rebuild the list from the original asset data.
+        assetSelect.innerHTML = '';
+        const placeholder = document.createElement('option');
+        placeholder.value = '';
+        placeholder.textContent = 'Select registered customer asset';
+        placeholder.disabled = true;
+        placeholder.hidden = true;
+        placeholder.selected = true;
+        assetSelect.appendChild(placeholder);
+
+        let visibleCount = 0;
+        let firstMatchingValue = '';
+
+        allAssets.forEach(function (asset) {
+          const show = email !== '' && (
+            asset.email === email ||
+            (userId !== '' && asset.customerId === userId) ||
+            (userId !== '' && asset.matchedUserId === userId)
+          );
+
+          if (show) {
+            const option = document.createElement('option');
+            option.value = asset.value;
+            option.textContent = asset.text;
+            assetSelect.appendChild(option);
+            visibleCount++;
+            if (!firstMatchingValue) firstMatchingValue = asset.value;
+          }
+        });
+
+        // Restore the previous selection if it still belongs to this client.
+        if (currentValue && Array.from(assetSelect.options).some(function (o) {
+          return o.value === currentValue;
+        })) {
+          assetSelect.value = currentValue;
+        } else if (visibleCount === 1) {
+          // If there is exactly one registered asset, select it automatically.
+          assetSelect.value = firstMatchingValue;
+        }
+
+        if (!email) {
+          assetHelp.textContent = 'Select a Client Target Email first; Registered Asset will then show only that client\'s registered assets.';
+        } else if (visibleCount === 0) {
+          assetHelp.textContent = 'No Registered Asset is linked to this client. Please check Client Assets.';
+        } else {
+          assetHelp.textContent = visibleCount + ' Registered Asset(s) available for the selected client.';
+        }
+      }
+
+      clientSelect.addEventListener('change', syncRegisteredAssets);
+      syncRegisteredAssets();
+    });
+
+    // Module: Dynamic Dropdown Asset ID String Prefixer interlock matching your system rules
+    function updateAssetIdPlaceholder() {
+        const assetType = document.getElementById('asset_type').value;
+        const assetIdField = document.getElementById('asset_id');
+        if (assetType === 'Elevator') { assetIdField.placeholder = "e.g., ELV-9-C"; }
+        else if (assetType === 'AC') { assetIdField.placeholder = "e.g., AC-202"; }
+        else if (assetType === 'Generator') { assetIdField.placeholder = "e.g., GEN-303"; }
+    }
+  </script>
+</head>
+<body>
+
+  <!-- ================= TOP NAVIGATION BAR ================= -->
+  <nav class="navbar manager-navbar d-flex align-items-center justify-content-between">
+    <div class="d-flex align-items-center gap-3">
+      <a href="manager-dashboard.php" class="brand-accent d-flex align-items-center gap-2">
+        <img src="img/logo.svg.svg" alt="Logo" style="height: 35px; width: auto;" onerror="this.style.display='none';">
+        <span>ARN <span>QuickFix Ltd.</span></span>
+      </a>
+    </div>
+    <div class="d-flex align-items-center gap-3">
+      <div class="d-flex align-items-center gap-2 bg-light px-3 py-1.5 rounded-pill border" style="border-color: #E2E8F0 !important;">
+        <div style="width: 8px; height: 8px; background-color: #10B981;" class="rounded-circle"></div>
+        <span class="small fw-semibold text-secondary" style="font-size: 13px;">
+          Manager: <strong class="text-dark fw-bold"><?php echo htmlspecialchars($managerName); ?></strong>
+        </span>
+      </div>
+      <a href="manager-dashboard.php" class="btn btn-sm btn-outline-secondary rounded-pill px-4 fw-bold" style="font-size: 12.5px; height: 34px; display: flex; align-items: center;">Back to Hub</a>
+    </div>
+  </nav>
+
+  <!-- ================= MASTER CANVAS WORKING SHEET CONTAINER ================= -->
+  <div class="container py-5" style="max-width: 1140px;">
+    
+    <!-- Header Labels Row -->
+    <div class="mb-4">
+      <h2 class="fw-bold m-0" style="font-size: 26px; letter-spacing: -0.5px;">Maintenance Schedule</h2>
+      <p class="text-muted m-0 small fw-medium mt-1">Manager assigns periodic preventative maintenance operations. Clients trace entries live inside portals.</p>
+    </div>
+
+    <!-- Alert Messaging Row -->
+    <?php if (!empty($actionMessage)): ?>
+      <div class="alert alert-success border-0 shadow-sm rounded-3 p-3 mb-4 fw-bold font-monospace" style="border-left: 5px solid #10B981 !important; font-size:13.5px; color:#065F46;">
+        🎉 <?php echo $actionMessage; ?>
+      </div>
+    <?php endif; ?>
+    <?php if (!empty($actionError)): ?>
+      <div class="alert alert-danger border-0 shadow-sm rounded-3 p-3 mb-4 fw-bold font-monospace" style="border-left: 5px solid #EF4444 !important; font-size:13.5px; color:#991B1B;">
+        ⚠️ Operational Limit: <?php echo $actionError; ?>
+      </div>
+    <?php endif; ?>
+
+    <!-- ================= SECTION A: METRIC WIDGETS ROW (MATCHES FIGMA) ================= -->
+    <div class="row g-4 mb-5">
+      <div class="col-md-6">
+        <div class="metric-box-sub">
+          <div class="small fw-bold text-secondary text-uppercase mb-2" style="font-size: 11px; letter-spacing: 0.5px;">Total Scheduled</div>
+          <div class="metric-value-large"><?php echo $totalScheduled; ?></div>
+        </div>
+      </div>
+      
+                      <!-- ================= METRIC BOX: OVERDUE ALERTS (FIXED) ================= -->
+            <div class="col-md-6">
+        <div class="metric-box-sub" style="border-left: 3px solid #EF4444 !important;">
+          <div class="small fw-bold text-danger text-uppercase mb-2" style="font-size: 11px; letter-spacing: 0.5px;">Overdue</div>
+          
+          <!-- FIXED LINE: Added the missing closing angle bracket right here before your PHP tags start -->
+          <div class="metric-value-large text-danger">
+            <?php echo $totalOverdue; ?>
+          </div>
+          
+        </div>
+    </div>
+
+
+
+
+        <!-- ================= SECTION B: ADD MAINTENANCE CARD VIEW PANEL (WITH ACTIVE FORMS MEMORY) ================= -->
+    <div class="figma-card-layout mb-5">
+      <h4 class="fw-bold mb-4 text-dark" style="font-size: 16px; text-transform: uppercase; letter-spacing: 0.5px;">Add Maintenance</h4>
+      
+      <form action="overdue_maintenance.php" method="POST">
+        <input type="hidden" name="action_type" value="add_schedule">
+        
+        <div class="row g-3">
+          <!-- Input 1: Client Email Target Selector -->
+          <div class="col-md-4">
+            <label class="form-label form-label-custom">Client Target Email</label>
+            <select name="client_email" class="form-select form-select-custom w-100" required>
+              <option value="" disabled selected hidden>Select Client Node</option>
+              <?php if ($clientsList && $clientsList->num_rows > 0): 
+                // Rewind user list to start line for execution safety
+                $clientsList->data_seek(0);
+                while ($c = $clientsList->fetch_assoc()): 
+                  $selected = ($cache['client_email'] === $c['email']) ? 'selected' : '';
+              ?>
+                  <option value="<?php echo htmlspecialchars($c['email']); ?>" data-user-id="<?php echo (int)$c['id']; ?>" <?php echo $selected; ?>><?php echo htmlspecialchars($c['name'] . " (" . $c['email'] . ")"); ?></option>
+                <?php endwhile; ?>
+              <?php endif; ?>
+            </select>
+          </div>
+
+          <!-- Input 2: Canonical Asset Selector -->
+          <div class="col-md-8">
+            <label class="form-label form-label-custom">Registered Asset</label>
+            <select name="asset_ref_id" id="asset_ref_id" class="form-select form-select-custom w-100" required>
+              <option value="" disabled selected hidden>Select registered customer asset</option>
+              <?php
+              $assetOptions = $conn->query("SELECT a.id,a.asset_id,a.asset_type,a.customer_email,a.customer_id,
+                                                   COALESCE(NULLIF(u.name,''), a.customer_email) AS customer_name,
+                                                   u.id AS matched_user_id
+                                            FROM assets a
+                                            LEFT JOIN users u
+                                              ON u.id = a.customer_id
+                                              OR LOWER(TRIM(u.email)) = LOWER(TRIM(a.customer_email))
+                                            GROUP BY a.id
+                                            ORDER BY customer_name ASC, a.asset_id ASC");
+              $selectedClientEmail = strtolower(trim($cache['client_email'] ?? ''));
+              $selectedAssetId = (int)($_SESSION['selected_asset_ref_id'] ?? 0);
+              $assetOptionCount = 0;
+              if($assetOptions):
+                while($ao=$assetOptions->fetch_assoc()):
+              ?>
+                <option value="<?php echo (int)$ao['id']; ?>"
+                        data-email="<?php echo htmlspecialchars(strtolower(trim($ao['customer_email']))); ?>"
+                        data-customer-id="<?php echo (int)($ao['customer_id'] ?? 0); ?>"
+                        data-matched-user-id="<?php echo (int)($ao['matched_user_id'] ?? 0); ?>"
+                        data-client-name="<?php echo htmlspecialchars($ao['customer_name']); ?>"
+                        <?php echo ($selectedAssetId === (int)$ao['id']) ? 'selected' : ''; ?>>
+                  <?php echo htmlspecialchars($ao['asset_id']); ?> — <?php echo htmlspecialchars($ao['asset_type']); ?> — <?php echo htmlspecialchars($ao['customer_name']); ?>
+                </option>
+              <?php
+                endwhile;
+              endif;
+              ?>
+            </select>
+            <div id="assetHelp" class="form-text">Select a Client Target Email first; Registered Asset will then show only that client's registered assets.</div>
+          </div>
+
+          <!-- Input 4: Last Serviced Log Calendar Date Picker -->
+          <div class="col-md-4">
+            <label class="form-label form-label-custom">Last Service Date</label>
+            <input type="date" name="last_service" class="form-control form-control-custom" value="<?php echo htmlspecialchars($cache['last_service']); ?>">
+          </div>
+
+          <!-- Input 5: Next Calibration Threshold Target Date Picker -->
+          <div class="col-md-4">
+            <label class="form-label form-label-custom">Next Due Date</label>
+            <input type="date" name="next_due" class="form-control form-control-custom" value="<?php echo htmlspecialchars($cache['next_due']); ?>" required>
+          </div>
+
+          <!-- Input 6: Operation Interval Window Option Selector Menu -->
+          <div class="col-md-4">
+            <label class="form-label form-label-custom">Maintenance Type</label>
+            <select name="maintenance_type" class="form-select form-select-custom w-100" required>
+              <option value="" disabled selected hidden>Select Maintenance Interval</option>
+              <option value="Monthly" <?php echo ($cache['maintenance_type'] === 'Monthly') ? 'selected' : ''; ?>>Monthly Cycle Servicing</option>
+              <option value="Quarterly" <?php echo ($cache['maintenance_type'] === 'Quarterly') ? 'selected' : ''; ?>>Quarterly System Optimization</option>
+              <option value="Half-Yearly" <?php echo ($cache['maintenance_type'] === 'Half-Yearly') ? 'selected' : ''; ?>>Half-Yearly Deep Diagnostics</option>
+              <option value="Annually" <?php echo ($cache['maintenance_type'] === 'Annually') ? 'selected' : ''; ?>>Annual Structural Overhaul</option>
+            </select>
+          </div>
+
+          <!-- Input 7: State Status Flag Selector Menu -->
+          <div class="col-md-4">
+            <label class="form-label form-label-custom">Initial Status</label>
+            <select name="status" class="form-select form-select-custom w-100">
+              <option value="Active" <?php echo ($cache['status'] === 'Active') ? 'selected' : ''; ?>>Active / In Queue</option>
+              <option value="Overdue" <?php echo ($cache['status'] === 'Overdue') ? 'selected' : ''; ?>>Overdue / Delayed Action</option>
+              <option value="Completed" <?php echo ($cache['status'] === 'Completed') ? 'selected' : ''; ?>>Completed / Closed Log</option>
+            </select>
+          </div>
+
+          <!-- Form Submit Button Box Container Alignment -->
+          <div class="col-md-8 d-flex align-items-end justify-content-end">
+            <button type="submit" class="btn btn-save-schedule w-100 fw-bold text-uppercase mt-4 mt-md-0" style="max-width: 280px; background-color: var(--primary-cyan); color: #FFFFFF;">Save Schedule</button>
+          </div>
+        </div>
+      </form>
+    </div>
+
+
+    <!-- ================= SECTION C: ACTIVE SCHEDULES DATA GRID LISTBOARD ================= -->
+    <div class="figma-card-layout">
+      <div class="table-responsive">
+        <table class="table align-middle m-0">
+          <thead>
+            <tr>
+              <th style="width: 55px; text-align: center;">SL</th>
+              <th>Client Information</th>
+              <th>Machinery Specs</th>
+              <th>Service Logs Calendar</th>
+              <th>Operational Cycle</th>
+              <th style="width: 140px; text-align: center;">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            <?php if ($schedulesLedger && $schedulesLedger->num_rows > 0): 
+              $serialNumberCounter = 1;
+              while ($row = $schedulesLedger->fetch_assoc()):
+                $statusClass = 'status-active';
+                if (isset($row['status']) && strtolower($row['status']) === 'overdue') { $statusClass = 'status-overdue'; }
+                elseif (isset($row['status']) && strtolower($row['status']) === 'completed') { $statusClass = 'status-completed'; }
+            ?>
+                            <tr>
+                <!-- Clean Serial Incremental Counting Line Index Row (SL) -->
+                <td class="font-monospace fw-bold text-secondary text-center"><?php echo $serialNumberCounter++; ?></td>
+                
+                                <td>
+                  <span class="d-block fw-bold text-dark mb-0.5">
+                    <?php echo htmlspecialchars($row['client_name'] ?? 'Client User'); ?>
+                  </span>
+                  
+                  <?php 
+                    // FIXED HOOK: If an asset has an active repair service request, pull its unique phone number, else fall back safely
+                    $displayPhoneNumber = !empty($row['real_client_phone']) ? $row['real_client_phone'] : ($row['phone'] ?? '01XXXXXXXXX'); 
+                  ?>
+                  
+                  <!-- CLEANED: Removed the accidental text characters '行业' to restore standard CSS styling rules -->
+                  <span class="text-muted font-monospace small d-block" style="font-size: 11.5px;">
+                    <?php echo htmlspecialchars($displayPhoneNumber); ?>
+                  </span>
+                </td>
+
+                
+                <td>
+                  <span class="d-block text-dark fw-bold mb-0.5"><?php echo htmlspecialchars($row['asset_type'] ?? 'Asset'); ?></span>
+                  <span class="badge bg-light text-dark font-monospace border" style="font-size: 11px;">ID: <strong><?php echo htmlspecialchars($row['asset_id'] ?? 'N/A'); ?></strong></span>
+                </td>
+                
+                <td>
+                  <span class="small d-block text-secondary mb-1" style="font-size: 12.5px;">Last: <strong class="text-dark font-monospace"><?php echo (!empty($row['last_service']) && $row['last_service'] !== '0000-00-00') ? date('d-m-Y', strtotime($row['last_service'])) : 'None Recorded'; ?></strong></span>
+                  <span class="small d-block text-secondary" style="font-size: 12.5px;">Next: <strong class="text-danger font-monospace fw-bold"><?php echo date('d-m-Y', strtotime($row['next_due'])); ?></strong></span>
+                </td>
+                
+                <td>
+                  <span class="fw-semibold text-dark" style="font-size: 13px;"><i class="fa fa-rotate me-1 text-muted"></i> <?php echo htmlspecialchars($row['maintenance_type'] ?? 'Periodic'); ?></span>
+                </td>
+                
+                <!-- ================= AUTOMATED DYNAMIC STATUS VALIDATOR ENGINE ================= -->
+                <td class="text-center">
+                  <?php
+                    $dbStatus = trim($row['status'] ?? 'Active');
+                    $nextDueTarget = $row['next_due'] ?? '';
+                    $currentCalendarDay = date('Y-m-d'); // Today: 2026-08-01
+
+                    // Strict Business Rules Interlock Overrides
+                    if ($nextDueTarget > $currentCalendarDay && $dbStatus === 'Completed') {
+                        // Force override future dates away from completed down to active status
+                        $verifiedStatus = 'Active';
+                        $statusClass = 'status-active';
+                    } elseif ($nextDueTarget < $currentCalendarDay && $dbStatus !== 'Completed') {
+                        // Force override past unresolved dates to show up as overdue automatically
+                        $verifiedStatus = 'Overdue';
+                        $statusClass = 'status-overdue';
+                    } else {
+                        // Standard database mappings configuration fallback paths
+                        $verifiedStatus = $dbStatus;
+                        $statusClass = 'status-active';
+                        if (strtolower($dbStatus) === 'overdue') { $statusClass = 'status-overdue'; }
+                        elseif (strtolower($dbStatus) === 'completed') { $statusClass = 'status-completed'; }
+                    }
+                  ?>
+                  <span class="status-badge-pill <?php echo $statusClass; ?>">
+                    <?php echo htmlspecialchars($verifiedStatus); ?>
+                  </span>
+                </td>
+              </tr>
+
+            <?php endwhile; ?>
+          <?php else: ?>
+            <!-- Fallback state if database has zero historical maintenance entries -->
+            <tr>
+              <td colspan="6" class="text-center py-5 text-muted font-monospace fw-bold" style="background-color: #FFFFFF;">
+                🍃 Zero maintenance parameters are currently registered inside your database cluster grid.
+              </td>
+            </tr>
+          <?php endif; ?>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </div> <!-- Close Master Canvas Layout Wrapper Container Container -->
+
+  <!-- Framework Compiled Engine Injector Libraries -->
+</body>
+</html>
+<?php 
+// Terminate your database integration connection thread cleanly on page exit
+if (isset($conn)) { 
+    $conn->close(); 
+} 
+?>

@@ -1,0 +1,702 @@
+<?php
+// 1. Initialize Active User Session and Force Authorization Guard Rails
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
+ini_set('display_errors', 1);
+ini_set('display_startup_errors', 1);
+error_reporting(E_ALL);
+
+// Restrict access directly to Authorized Managers only
+if (!isset($_SESSION['email']) || (isset($_SESSION['role']) && strtolower($_SESSION['role']) !== 'manager')) {
+    header("Location: login.php");
+    exit();
+}
+
+// 2. Establish High-Speed Local Database Integration Link
+$servername = "127.0.0.1";
+$username = "root";
+$password = "";
+$dbname = "arn_quickfix";
+
+$conn = new mysqli($servername, $username, $password, $dbname);
+if ($conn->connect_error) {
+    die("Database Connection Error: " . $conn->connect_error);
+}
+
+// ====================================================================
+// SESSION-BASED NOTIFICATION INTERCEPTOR TRACKER (SAFE REFACTOR)
+// ====================================================================
+// FIXED: This interceptor catches the double-click '?clear=1' url trigger cleanly!
+if (isset($_GET['clear']) && $_GET['clear'] == '1') {
+    // Stores a snapshot marker in the session memory instead of modifying database states!
+    $_SESSION['tech_muted_until'] = date('Y-m-d H:i:s');
+    header("Location: manager-dashboard.php");
+    exit();
+}
+
+// Safely pull the isolation time-marker out of active session memory
+$techMuteMarker = $_SESSION['tech_muted_until'] ?? '1970-01-01 00:00:00';
+
+
+
+// Keep your remaining sticky layout parameters running right below here smoothly...
+
+
+
+
+// FIXED VARIABLE CAPTURE: Fallback cleanly to their actual email handle if their name hasn't been set yet
+$managerEmail = $_SESSION['email'] ?? 'manager@arnquickfix.com';
+$managerName = !empty($_SESSION['name']) ? $_SESSION['name'] : strstr($managerEmail, '@', true);
+
+
+// 2. High-Performance Database Integration Connection
+$servername = "127.0.0.1";
+$username = "root";
+$password = "";
+$dbname = "arn_quickfix";
+
+$conn = new mysqli($servername, $username, $password, $dbname);
+if ($conn->connect_error) {
+    die("Database Connection Error: " . $conn->connect_error);
+}
+
+// 3. Dynamic Calculation Counters (Pulls live totals from MySQL)
+$newRequestsCount = 0;
+$inProgressCount = 0;
+$overdueAlertsCount = 0;
+
+$qNew = $conn->query("SELECT COUNT(*) as total FROM service_requests WHERE status IN ('pending', 'submitted')");
+if ($qNew) { $newRequestsCount = $qNew->fetch_assoc()['total'] ?? 0; }
+
+$qProgress = $conn->query("SELECT COUNT(*) as total FROM service_requests WHERE status = 'processing'");
+if ($qProgress) { $inProgressCount = $qProgress->fetch_assoc()['total'] ?? 0; }
+
+// ====================================================================
+// SYNCED COMMAND DESK SUMMARY OVERDUE ALERTS METRIC (FIXED)
+// ====================================================================
+$currentCalendarDay = date('Y-m-d'); // Baseline: 2026-08-03
+$overdueAlertsCount = 0;
+
+// FIXED PATH: Evaluates past deadlines and checks all casing types ('Overdue', 'overdue') cleanly!
+$qOverdue = $conn->query("SELECT COUNT(*) as total FROM maintenance_schedules 
+                          WHERE LOWER(status) != 'completed' 
+                          AND (LOWER(status) = 'overdue' OR next_due < '$currentCalendarDay')");
+
+if ($qOverdue) { 
+    $overdueAlertsCount = (int)($qOverdue->fetch_assoc()['total'] ?? 0); 
+}
+
+// ====================================================================
+// REAL-TIME TECHNICIAN UNREAD CHAT COUNT CALCULATOR (UPDATED & ALIGNED)
+// ====================================================================
+// ✅ FIXED: Counts only the actual typed text messages that have NOT been read by the manager yet (is_read = 0)
+$techUpdatesCount = 0;
+$qTech = $conn->query("SELECT COUNT(*) as total FROM technician_notes WHERE is_read = 0");
+if ($qTech) { 
+    $techUpdatesCount = $qTech->fetch_assoc()['total'] ?? 0; 
+}
+
+// Count Total Completed Reports Statements 
+$reportsCount = 0;
+$qRep = $conn->query("SELECT COUNT(*) as total FROM service_requests WHERE status = 'completed'");
+if ($qRep) { $reportsCount = $qRep->fetch_assoc()['total'] ?? 0; }
+
+// Count Total Customer Complaint Tickets Registered
+$complaintsCount = 0;
+$qComp = $conn->query("SELECT COUNT(*) as total FROM complaints");
+if ($qComp) { $complaintsCount = $qComp->fetch_assoc()['total'] ?? 0; }
+?>
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Manager Dashboard | ARN QuickFix</title>
+  
+  <!-- CRITICAL VECTOR INTERLOCK: Pulls all FontAwesome 6 icon and arrow metrics instantly from the CDN -->
+
+  
+  <!-- FIXED FRAMEWORK LINK: Case-aligned mapping matching your lowercase rename selection -->
+  <link href="css/bootstrap.min.css" rel="stylesheet">
+  <link href="css/style.css" rel="stylesheet">
+
+  <style>
+    :root {
+      --primary-cyan: #00C2CB;
+      --deep-navy: #0F172A;
+      --slate-gray: #475569;
+      --bg-canvas: #F8FAFC;
+      --border-light: #E2E8F0;
+    }
+    body {
+      background-color: var(--bg-canvas);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      color: var(--deep-navy);
+      -webkit-font-smoothing: antialiased;
+    }
+    .manager-navbar {
+      background-color: #FFFFFF;
+      border-bottom: 1px solid var(--border-light);
+      padding: 16px 45px;
+      box-shadow: 0 1px 3px rgba(15, 23, 42, 0.02);
+    }
+    .brand-accent {
+      font-weight: 800;
+      font-size: 24px;
+      color: var(--deep-navy);
+      text-decoration: none;
+      letter-spacing: -0.5px;
+    }
+    .brand-accent span {
+      color: var(--primary-cyan);
+    }
+    
+    /* Sleek Pill Badges Row Style */
+    .btn-action-badge {
+      font-size: 12px;
+      font-weight: 700;
+      padding: 8px 18px;
+      border-radius: 30px;
+      text-transform: uppercase;
+      text-decoration: none;
+      letter-spacing: 0.3px;
+      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+      box-shadow: 0 2px 4px rgba(0,0,0,0.02);
+    }
+    .badge-cyan { background-color: #ECFEFF; color: #0891B2; border: 1px solid #CFFAFE; }
+    .badge-cyan:hover { background-color: var(--primary-cyan); color: #FFF; transform: translateY(-1px); }
+    .badge-slate { background-color: #F1F5F9; color: #475569; border: 1px solid #E2E8F0; }
+    .badge-slate:hover { background-color: #64748B; color: #FFF; transform: translateY(-1px); }
+    .badge-light { background-color: #FFFFFF; color: #0F172A; border: 1px solid #CBD5E1; }
+    .badge-light:hover { border-color: var(--primary-cyan); color: var(--primary-cyan); transform: translateY(-1px); }
+    .badge-red { background-color: #FEF2F2; color: #EF4444; border: 1px solid #FEE2E2; }
+    .badge-red:hover { background-color: #EF4444; color: #FFF; transform: translateY(-1px); }
+
+    /* Counter Metric Cards Redesign */
+    .metric-container-card {
+      background: #FFFFFF;
+      border: 1px solid var(--border-light);
+      border-radius: 16px;
+      padding: 28px;
+      box-shadow: 0 4px 12px rgba(15, 23, 42, 0.015);
+      position: relative;
+      overflow: hidden;
+      transition: all 0.25s ease;
+    }
+    .metric-container-card:hover {
+      box-shadow: 0 10px 20px rgba(15, 23, 42, 0.03);
+    }
+    .metric-icon-box {
+      width: 48px;
+      height: 48px;
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 22px;
+      margin-bottom: 20px;
+    }
+    .bg-light-cyan { background-color: #ECFEFF; color: var(--primary-cyan); }
+    .bg-light-blue { background-color: #EFF6FF; color: #3B82F6; }
+    .bg-light-red { background-color: #FEF2F2; color: #EF4444; }
+    
+    .metric-card-title {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--slate-gray);
+      margin-bottom: 4px;
+    }
+    .metric-card-number {
+      font-size: 38px;
+      font-weight: 800;
+      color: var(--deep-navy);
+      line-height: 1;
+      margin-bottom: 8px;
+    }
+    .metric-card-desc {
+      font-size: 12.5px;
+      color: #64748B;
+      font-weight: 500;
+      margin-bottom: 20px;
+      min-height: 36px;
+    }
+    .metric-card-action {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--deep-navy);
+      text-decoration: none;
+      padding: 6px 14px;
+      background-color: #F8FAFC;
+      border-radius: 8px;
+      transition: all 0.2s;
+    }
+    .metric-container-card:hover .metric-card-action {
+      background-color: var(--deep-navy);
+      color: #FFFFFF;
+    }
+
+    /* Central Modern Workspace Matrix Panels */
+    .master-navigation-panel {
+      background: #FFFFFF;
+      border: 1px solid var(--border-light);
+      border-radius: 20px;
+      padding: 35px 30px;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      text-decoration: none;
+      color: inherit;
+      box-shadow: 0 4px 15px rgba(15, 23, 42, 0.01);
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      position: relative;
+    }
+    .master-navigation-panel:hover {
+      transform: translateY(-6px);
+      box-shadow: 0 20px 30px rgba(15, 23, 42, 0.04);
+      border-color: var(--primary-cyan);
+    }
+    .panel-visual-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 25px;
+    }
+    .panel-badge-icon {
+      width: 54px;
+      height: 54px;
+      border-radius: 14px;
+      background-color: #F8FAFC;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 24px;
+      color: var(--deep-navy);
+      transition: all 0.25s;
+    }
+    .master-navigation-panel:hover .panel-badge-icon {
+      background-color: #ECFEFF;
+      color: var(--primary-cyan);
+    }
+    .panel-arrow {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      background-color: #F1F5F9;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 13px;
+      color: var(--slate-gray);
+      transition: all 0.25s;
+    }
+    .master-navigation-panel:hover .panel-arrow {
+      background-color: var(--primary-cyan);
+      color: #FFFFFF;
+      transform: rotate(-45deg);
+    }
+    .panel-main-heading {
+      font-size: 21px;
+      font-weight: 800;
+      color: var(--deep-navy);
+      margin-bottom: 8px;
+      letter-spacing: -0.3px;
+    }
+    .panel-summary-text {
+      font-size: 13.5px;
+      color: var(--slate-gray);
+      font-weight: 500;
+      line-height: 1.5;
+      margin: 0;
+    }
+    .transition-panel {
+      transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    /* Creates an elite card rise and shadows expand when mouse hovers over panels */
+    .transition-panel:hover {
+      transform: translateY(-6px);
+      box-shadow: 0 12px 25px rgba(15, 23, 42, 0.06) !important;
+      border-color: #00C2CB !important;
+    }
+    /* Causes the integrated right arrows to shift forward and switch color automatically */
+    .transition-panel:hover .panel-arrow-indicator {
+      background-color: #00C2CB !important;
+      color: #FFFFFF !important;
+      transform: translateX(3px) rotate(-45deg);
+    }
+  </style>
+</head>
+<body>
+
+  <!-- ================= TOP EXECUTIVES NAVIGATION BAR ================= -->
+  <nav class="navbar manager-navbar d-flex align-items-center justify-content-between">
+    <div class="d-flex align-items-center gap-3">
+      <a href="index.php" class="brand-accent d-flex align-items-center gap-2">
+        <img src="img/logo.svg.svg" alt="Logo" style="height: 60px; width: auto;" onerror="this.style.display='none';">
+        <span>ARN <span>QuickFix Ltd.</span></span>
+      </a>
+      <span class="badge bg-dark rounded-pill font-monospace px-3 py-1.5 ms-2" style="font-size: 11px; letter-spacing: 0.5px;"></span>
+    </div>
+    
+    <div class="d-flex align-items-center gap-3">
+      <div class="d-flex align-items-center gap-2 me-2 bg-light px-3 py-1.5 rounded-pill border" style="border-color: #E2E8F0 !important;">
+        <!-- Pulsing Active Connection Node Dot -->
+        <div style="width: 8px; height: 8px; background-color: #10B981;" class="rounded-circle"></div>
+        <span class="small fw-semibold text-secondary" style="font-size: 13px;">
+          Manager: <strong class="text-dark fw-bold"><?php echo $managerName; ?></strong>
+        </span>
+      </div>
+      <!-- REQUIRED ATTRIBUTES: Check that data-bs-toggle and data-bs-target match your modal exactly -->
+<a href="logout.php" class="btn btn-sm btn-outline-danger rounded-pill px-3 py-1 fw-bold" onclick="return confirm('Are you sure you want to log out?');" style="font-size:12px;">Logout</a>
+    </div>
+
+    </div>
+  </nav>
+
+  <!-- ================= CENTRAL DESKTOP SHEET WRAPPER ================= -->
+    <!-- ================= MASTER DESIGN DASHBOARD CANVASES LAYER ================= -->
+  <div class="container py-5" style="max-width: 1140px;">
+    
+    <!-- Headline Section Header (WITH INTEGRATED LINK BUTTONS) -->
+    <div class="d-flex justify-content-between align-items-center mb-5 pb-3" style="border-bottom: 2px solid #E2E8F0;">
+      <div>
+        <h2 class="fw-bold m-0" style="font-size: 28px; color: #0F172A; letter-spacing: -0.5px;">Manager Dashboard</h2>
+        <p class="text-muted m-0 small fw-medium mt-1">Review operational incoming traffic metrics, assign engineers, and manage catalog pipelines.</p>
+      </div>
+      
+              <!-- Premium Quick Action Buttons (Pill Shaped With Hover Transition Effects) -->
+        <div class="d-flex align-items-center gap-2">
+        <!-- ================= TECH UPDATES BUTTON: WITH HYBRID SINGLE/DOUBLE CLICK INTERLOCK ================= -->
+        <?php
+          // ✅ FIXED: Counts only the actual typed text messages that have NOT been read by the manager yet (is_read = 0)
+          $liveTechUpdatesCount = 0;
+          $techCountQuery = $conn->query("SELECT COUNT(*) as active_updates FROM technician_notes WHERE is_read = 0");
+          if ($techCountQuery) {
+              $techCountData = $techCountQuery->fetch_assoc();
+              $liveTechUpdatesCount = (int)($techCountData['active_updates'] ?? 0);
+          }
+        ?>
+        
+        <!-- THE INTELLIGENT ROUTER LINK -->
+        <a href="manager-tech-updates.php" 
+           id="techUpdatesPillButton"
+           title="Click once to view updates. Double-click to Mark All Read."
+           class="btn btn-sm px-3 fw-bold text-uppercase rounded-pill d-inline-flex align-items-center justify-content-center gap-1.5" 
+           style="font-size: 10px; height: 32px; text-decoration: none; white-space: nowrap;
+                  background-color: <?php echo ($liveTechUpdatesCount > 0) ? '#ECFEFF' : '#F8FAFC'; ?>; 
+                  color: <?php echo ($liveTechUpdatesCount > 0) ? '#0891B2' : '#64748B'; ?>; 
+                  border: 1px solid <?php echo ($liveTechUpdatesCount > 0) ? '#CFFAFE' : '#E2E8F0'; ?>;">
+          Tech Updates
+          
+          <?php if ($liveTechUpdatesCount > 0): ?>
+            <span class="badge rounded-circle text-white d-flex align-items-center justify-content-center p-0 font-monospace" 
+                  style="width: 15px; height: 15px; font-size: 9px; background-color: #06B6D4 !important; line-height: 1; padding: 4px 7px;">
+              <?php echo $liveTechUpdatesCount; ?>
+            </span>
+          <?php else: ?>
+            <span style="width: 5px; height: 5px; background-color: #94A3B8;" class="rounded-circle d-inline-block"></span>
+          <?php endif; ?>
+        </a>
+
+
+        <!-- CLICK MATRIX INTERFERENCE LOCK SCRIPTS -->
+        <script>
+          (function() {
+              let tapTrackingTimer = null;
+              const targetButtonElement = document.getElementById("techUpdatesPillButton");
+              
+              if (targetButtonElement) {
+                  targetButtonElement.addEventListener("click", function(event) {
+                      event.preventDefault(); // Blocks standard browser page-jump overrides
+                      
+                      if (tapTrackingTimer === null) {
+                          // Step A: First Tap Caught! Start waiting 250 milliseconds for a second tap
+                          tapTrackingTimer = setTimeout(function() {
+                              tapTrackingTimer = null;
+                              // Standard Single Click: Navigate to updates list board smoothly
+                              window.location.href = "manager-tech-updates.php";
+                          }, 250);
+                      } else {
+                          // Step B: Second Tap Caught within 250ms! Double-click confirmed
+                          clearTimeout(tapTrackingTimer);
+                          tapTrackingTimer = null;
+                          // Execute clear all parameters inside XAMPP database rows instantly
+                          window.location.href = "manager-dashboard.php?clear=1";
+                      }
+                  });
+              }
+          })();
+        </script>
+
+
+
+
+
+
+
+
+
+                <!-- FIXED ALIGNED REPORTS PILL: Flexbox alignment parameters force text exactly to the vertical center -->
+        <a href="manager_reports.php" class="btn btn-sm px-3 fw-bold text-uppercase rounded-pill d-inline-flex align-items-center justify-content-center" 
+           style="font-size: 10px; height: 32px; background-color: #F1F5F9; color: #475569; border: 1px solid #E2E8F0; text-decoration: none; white-space: nowrap;">
+          Reports
+        </a>
+
+                <!-- ================= DYNAMIC COMPLAINTS HUB LINK MATRIX ================= -->
+        <?php
+          // FORCE ACTIVE SYNC: Recalculates raised disputes fresh from your table right before printing the badge
+          $liveComplaintsCount = 0;
+          $countQuery = $conn->query("SELECT COUNT(*) as active_claims FROM service_requests WHERE status = 'complaint_raised'");
+          if ($countQuery) {
+              $countData = $countQuery->fetch_assoc();
+              $liveComplaintsCount = (int)($countData['active_claims'] ?? 0);
+          }
+        ?>
+        
+        <a href="manager_complaints.php" class="btn btn-sm px-3 fw-bold text-uppercase rounded-pill d-inline-flex align-items-center justify-content-center gap-1.5" 
+           style="font-size: 10px; height: 32px; text-decoration: none; white-space: nowrap;
+                  background-color: <?php echo ($liveComplaintsCount > 0) ? '#FEF2F2' : '#F8FAFC'; ?>; 
+                  color: <?php echo ($liveComplaintsCount > 0) ? '#EF4444' : '#64748B'; ?>; 
+                  border: 1px solid <?php echo ($liveComplaintsCount > 0) ? '#FEE2E2' : '#E2E8F0'; ?>;">
+          Complaints 
+          
+          <?php if ($liveComplaintsCount > 0): ?>
+            <!-- This badge container will ONLY show up on screen if a complaint is actively sitting in the database rows -->
+            <span class="badge rounded-pill text-white" 
+                  style="font-size: 9px; padding: 2px 5px; margin-left: 2px; background-color: #EF4444 !important; font-family: sans-serif; vertical-align: middle;">
+              <?php echo $liveComplaintsCount; ?>
+            </span>
+          <?php endif; ?>
+        </a>
+        
+        <a href="manager-profile.php" class="btn btn-sm px-3 py-2 fw-bold text-uppercase rounded-pill" style="font-size: 11px; background-color: #FFFFFF; color: #0F172A; border: 1px solid #CBD5E1;">Profile</a>
+      </div>
+    </div>
+
+            
+
+
+    <!-- ================= SECTION A: UPPER COUNTER METRICS CARDS (WITH INTEGRATED ICON BOXES) ================= -->
+    <div class="row g-4 mb-5">
+      
+      <!-- Box 1: New Requests Tracker Card -->
+          <!-- ================= SECTION A: UPPER COUNTER METRICS CARDS (EASY VIEW) ================= -->
+    <div class="row g-4 mb-5">
+      
+      <!-- Box 1: New Requests Tracker Card -->
+      <div class="col-md-4">
+        <div class="p-4 bg-white border rounded-4 shadow-sm h-100" style="border-color: #E2E8F0 !important;">
+          <!-- UNIVERSAL SYSTEM EMOJI ICON: Works instantly offline without any CSS links -->
+          <div class="d-flex align-items-center justify-content-center mb-3 rounded-3" style="width: 46px; height: 46px; background-color: #ECFEFF; font-size: 22px;">
+            📩
+          </div>
+          <div class="fw-bold small mb-1" style="color: #64748B; text-transform: uppercase; letter-spacing: 0.5px;">New Requests</div>
+          <div class="fw-bold mb-2" style="font-size: 36px; color: #0F172A; line-height: 1;"><?php echo $newRequestsCount; ?></div>
+          <p class="text-secondary small mb-4" style="min-height: 36px; font-size: 12.5px; line-height: 1.5;">New client issue complaints queued and pending supervisor diagnostic review.</p>
+          <a href="manager_new_requests.php?filter=new" class="btn btn-sm w-100 fw-bold d-flex align-items-center justify-content-between px-3 py-2 rounded-3" style="background-color: #F8FAFC; color: #1E293B; border: 1px solid #E2E8F0; font-size: 12px; text-decoration: none;">
+            <span>Process New Requests</span>
+            <!-- UNIVERSAL ARROW EMBED: Renders explicitly on any screen space -->
+            <span style="font-weight: bold; font-family: monospace; color: #94A3B8;">➔</span>
+          </a>
+        </div>
+      </div>
+
+      <!-- Box 2: In Progress Tracker Card -->
+      <div class="col-md-4">
+        <div class="p-4 bg-white border rounded-4 shadow-sm h-100" style="border-color: #E2E8F0 !important;">
+          <div class="d-flex align-items-center justify-content-center mb-3 rounded-3" style="width: 46px; height: 46px; background-color: #EFF6FF; font-size: 22px;">
+            🛠️
+          </div>
+          <div class="fw-bold small mb-1" style="color: #64748B; text-transform: uppercase; letter-spacing: 0.5px;">In Progress</div>
+          <div class="fw-bold mb-2" style="font-size: 36px; color: #0F172A; line-height: 1;"><?php echo $inProgressCount; ?></div>
+          <p class="text-secondary small mb-4" style="min-height: 36px; font-size: 12.5px; line-height: 1.5;">Service logs currently handled and open on technician field terminals.</p>
+          <a href="manager_in_progress.php?filter=progress" class="btn btn-sm w-100 fw-bold d-flex align-items-center justify-content-between px-3 py-2 rounded-3" style="background-color: #F8FAFC; color: #1E293B; border: 1px solid #E2E8F0; font-size: 12px; text-decoration: none;">
+            <span>View Active Work</span>
+            <span style="font-weight: bold; font-family: monospace; color: #94A3B8;">➔</span>
+          </a>
+        </div>
+      </div>
+
+      <!-- Box 3: Overdue Alerts Tracker Card -->
+      <div class="col-md-4">
+        <div class="p-4 bg-white border rounded-4 shadow-sm h-100" style="border-color: #E2E8F0 !important;">
+          <div class="d-flex align-items-center justify-content-center mb-3 rounded-3" style="width: 46px; height: 46px; background-color: #FEF2F2; font-size: 22px;">
+            ⚠️
+          </div>
+          <div class="fw-bold small mb-1" style="color: #64748B; text-transform: uppercase; letter-spacing: 0.5px;">Overdue Alerts</div>
+          <div class="fw-bold mb-2 text-danger" style="font-size: 36px; line-height: 1;"><?php echo $overdueAlertsCount; ?></div>
+          <p class="text-secondary small mb-4" style="min-height: 36px; font-size: 12.5px; line-height: 1.5;">Scheduled check intervals and calibrations missed by regional field crews.</p>
+          <a href="overdue_maintenance.php" class="btn btn-sm w-100 fw-bold d-flex align-items-center justify-content-between px-3 py-2 rounded-3 text-danger" style="background-color: #FEF2F2; border: 1px solid #FEE2E2; font-size: 12px; text-decoration: none;">
+            <span>Open Maintenance</span>
+            <span style="font-weight: bold; font-family: monospace;">➔</span>
+          </a>
+        </div>
+      </div>
+
+    </div>
+
+
+    <!-- ================= SECTION B: CENTRAL NAVIGATION WORKSPACE MATRIX PANELS ================= -->
+        <!-- ================= SECTION B: CENTRAL NAVIGATION WORKSPACE MATRIX PANELS (EASY VIEW) ================= -->
+    <div class="row g-4">
+      
+      <!-- Card 1: All Service Requests Operational Hub Link -->
+      <div class="col-md-4">
+        <a href="manager_all_requests.php" class="d-flex flex-column p-4 bg-white border rounded-4 text-decoration-none h-100 transition-panel" style="border-color: #E2E8F0; color: inherit;">
+          <div class="d-flex justify-content-between align-items-center mb-4">
+            <!-- NATIVE EMOJI ICON: Renders instantly everywhere -->
+            <div class="d-flex align-items-center justify-content-center rounded-3" style="width: 50px; height: 50px; font-size: 24px; background-color: #F8FAFC !important;">
+              📁
+            </div>
+            <!-- Dynamic Right-Top Navigation Arrow Circle (Using a clean monospace text arrow) -->
+            <div class="d-flex align-items-center justify-content-center rounded-circle panel-arrow-indicator" style="width: 30px; height: 30px; background-color: #F1F5F9; color: #64748B; font-weight: bold; font-family: monospace; font-size: 14px;">
+              ➔
+            </div>
+          </div>
+          <h4 class="fw-bold mb-2 text-dark" style="font-size: 20px; letter-spacing: -0.3px;">All Service Requests</h4>
+          <p class="text-secondary small m-0 fw-medium" style="font-size: 13px; line-height: 1.5;">Review customer technical diagnostics reports, assign engineers, and monitor live status tracks.</p>
+        </a>
+      </div>
+
+      <!-- Card 2: Inventory Tracking Hub Link -->
+      <div class="col-md-4">
+        <a href="manager_inventory.php" class="d-flex flex-column p-4 bg-white border rounded-4 text-decoration-none h-100 transition-panel" style="border-color: #E2E8F0; color: inherit;">
+          <div class="d-flex justify-content-between align-items-center mb-4">
+            <div class="d-flex align-items-center justify-content-center rounded-3" style="width: 50px; height: 50px; font-size: 24px; background-color: #F8FAFC !important;">
+              📦
+            </div>
+            <div class="d-flex align-items-center justify-content-center rounded-circle panel-arrow-indicator" style="width: 30px; height: 30px; background-color: #F1F5F9; color: #64748B; font-weight: bold; font-family: monospace; font-size: 14px;">
+              ➔
+            </div>
+          </div>
+          <h4 class="fw-bold mb-2 text-dark" style="font-size: 20px; letter-spacing: -0.3px;">Inventory</h4>
+          <p class="text-secondary small m-0 fw-medium" style="font-size: 13px; line-height: 1.5;">View parts, replacement components availability metrics, and adjust baseline machinery prices.</p>
+        </a>
+      </div>
+
+      <!-- Card 3: Analytics, Reports & Metrics Link -->
+      <div class="col-md-4">
+        <a href="manager_reports.php" class="d-flex flex-column p-4 bg-white border rounded-4 text-decoration-none h-100 transition-panel" style="border-color: #E2E8F0; color: inherit;">
+          <div class="d-flex justify-content-between align-items-center mb-4">
+            <div class="d-flex align-items-center justify-content-center rounded-3" style="width: 50px; height: 50px; font-size: 24px; background-color: #F8FAFC !important;">
+              📈
+            </div>
+            <div class="d-flex align-items-center justify-content-center rounded-circle panel-arrow-indicator" style="width: 30px; height: 30px; background-color: #F1F5F9; color: #64748B; font-weight: bold; font-family: monospace; font-size: 14px;">
+              ➔
+            </div>
+          </div>
+          <h4 class="fw-bold mb-2 text-dark" style="font-size: 20px; letter-spacing: -0.3px;">Reports & Metrics</h4>
+          <p class="text-secondary small m-0 fw-medium" style="font-size: 13px; line-height: 1.5;">Analyze core resolution metrics, structural timeline diagnostics trends, and crew efficiency scales.</p>
+        </a>
+      </div>
+    </div> <!-- Closes Section B card layout row container -->
+
+    <div class="row g-4 mt-1">
+      <div class="col-md-4">
+        <a href="manager-assets.php" class="d-flex flex-column p-4 bg-white border rounded-4 text-decoration-none h-100 transition-panel" style="border-color:#E2E8F0;color:inherit;">
+          <div class="d-flex justify-content-between align-items-center mb-3"><div style="font-size:26px;">🏷️</div><span class="badge bg-primary-subtle text-primary">Registry</span></div>
+          <h4 class="fw-bold mb-2 text-dark" style="font-size:20px;">Asset Management</h4>
+          <p class="text-secondary small m-0">Search every registered Asset ID, customer, asset type and service history.</p>
+        </a>
+      </div>
+      <div class="col-md-4">
+        <a href="manager-technicians.php" class="d-flex flex-column p-4 bg-white border rounded-4 text-decoration-none h-100 transition-panel" style="border-color:#E2E8F0;color:inherit;">
+          <div class="d-flex justify-content-between align-items-center mb-3"><div style="font-size:26px;">👨‍🔧</div><span class="badge bg-info-subtle text-info">Performance</span></div>
+          <h4 class="fw-bold mb-2 text-dark" style="font-size:20px;">Technician Management</h4>
+          <p class="text-secondary small m-0">View every technician, assigned/completed jobs, average ratings, customer reviews and promotion history.</p>
+        </a>
+      </div>
+      <div class="col-md-4">
+        <a href="manager-price-history.php" class="d-flex flex-column p-4 bg-white border rounded-4 text-decoration-none h-100 transition-panel" style="border-color:#E2E8F0;color:inherit;">
+          <div class="d-flex justify-content-between align-items-center mb-3"><div style="font-size:26px;">৳</div><span class="badge bg-warning-subtle text-warning">Audit</span></div>
+          <h4 class="fw-bold mb-2 text-dark" style="font-size:20px;">Service Price History</h4>
+          <p class="text-secondary small m-0">Update service prices while preserving original values, previous prices, manager identity, date and reason.</p>
+        </a>
+      </div>
+    </div>
+  </div> <!-- Closes the central workspace central grid sheet wrapper -->
+
+    <!-- ================= MASTER FIELD TECH OPERATIONS STREAM FEED MODAL ================= -->
+  <div class="modal fade" id="techUpdatesModal" tabindex="-1" aria-hidden="true" style="backdrop-filter: blur(4px);">
+    <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable" style="max-width: 440px;">
+      <div class="modal-content border-0 rounded-4 shadow-lg">
+        <div class="modal-header border-bottom p-3.5 bg-light">
+          <h6 class="modal-title fw-bold text-dark d-flex align-items-center gap-2 m-0" style="font-size: 15px;">
+            <span>📡</span> Live Field Crew Activity Stream
+          </h6>
+          <button type="button" class="btn-close small" data-bs-dismiss="modal" aria-label="Close" style="font-size: 10px;"></button>
+        </div>
+        <div class="modal-body p-3">
+          <div class="d-flex flex-column gap-2.5">
+            <?php
+            // Pull the 4 most active processing/completed ticket rows where a technician has taken action
+            $techFeed = $conn->query("SELECT id, asset_id, asset_type, location, status, updated_at FROM service_requests WHERE status IN ('processing', 'completed') ORDER BY updated_at DESC LIMIT 4");
+            
+            if ($techFeed && $techFeed->num_rows > 0):
+                while ($tLog = $techFeed->fetch_assoc()):
+                    $isDone = ($tLog['status'] === 'completed');
+                    $feedItemBg = $isDone ? '#F0FDF4' : '#EFF6FF';
+                    $feedItemBorder = $isDone ? '#DCFCE7' : '#BFDBFE';
+                    $feedItemDot = $isDone ? '#10B981' : '#2563EB';
+                    
+                    // Extract tech name from location template parameters cleanly
+                    $locStr = $tLog['location'] ?? '';
+                    $techEngineer = "Field Crew Engineer";
+                    if (preg_match('/\(Assigned to:\s*([^)]+)\)/', $locStr, $matches)) {
+                        $techEngineer = trim($matches[1]);
+                    }
+            ?>
+              <!-- Dynamic Field Notification Row Card -->
+              <div class="p-3 border rounded-3 d-flex flex-column gap-1" style="background-color: <?php echo $feedItemBg; ?>; border-color: <?php echo $feedItemBorder; ?> !important;">
+                <div class="d-flex align-items-center justify-content-between">
+                  <div class="d-flex align-items-center gap-2">
+                    <div style="width: 6px; height: 6px; background-color: <?php echo $feedItemDot; ?>;" class="rounded-circle"></div>
+                    <strong class="text-dark" style="font-size: 12.5px;"><?php echo htmlspecialchars($techEngineer); ?></strong>
+                  </div>
+                  <span class="text-muted font-monospace" style="font-size: 10.5px;"><?php echo date('H:i', strtotime($tLog['updated_at'])); ?></span>
+                </div>
+                <p class="m-0 text-secondary" style="font-size: 12px; line-height: 1.45; font-weight: 500;">
+                  <?php if($isDone): ?>
+                    Successfully finalized all servicing arrays and closed out repair ticket for unit **#<?php echo htmlspecialchars($tLog['asset_id']); ?>** (<?php echo htmlspecialchars($tLog['asset_type']); ?>) [1.1].
+                  <?php else: ?>
+                    Initiated site deployment diagnostics and updated status to on-field processing for unit **#<?php echo htmlspecialchars($tLog['asset_id']); ?>** [1.1].
+                  <?php endif; ?>
+                </p>
+              </div>
+            <?php endwhile; else: ?>
+              <div class="text-center py-4 text-muted small font-monospace">🍃 No field technician logs recorded in the current active session logs.</div>
+            <?php endif; ?>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+   <!-- ================= MASTER APPLICATION JS INFRASTRUCTURE ================= -->
+  
+   <!-- ================= MASTER APPLICATION INTERACTIVE SCRIPT STACK ================= -->
+  
+  <!-- ================= MASTER APPLICATION SCRIPT INFRASTRUCTURE ================= -->
+  
+  <!-- 1. ADD THIS JQUERY ENGINE FIRST (Paste this line right above the previous owner's scripts) -->
+
+  <!-- 2. The Previous Owner's Bootstrap script (Keep this exactly as they wrote it) -->
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  
+  <!-- 3. Your Local Project Animation script -->
+  <script src="js/main.js"></script>
+
+</body>
+</html>
+
+<?php 
+// Terminate your database integration connection thread cleanly on page exit
+if (isset($conn)) { 
+    $conn->close(); 
+} 
+?>
